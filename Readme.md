@@ -127,6 +127,260 @@ A Cinnamon guide for Ubuntu 24.04 shows:
 Then log out/reboot and select the Cinnamon session from the login screen. [page:7]
 
 
+### ${\color{#f15bb5}\textsf{Stable Hostnames, /etc/hosts, and SSH Connectivity}}$ 
+
+### ${\color{#f15bb5}\textsf{Goal}}$ 
+
+Make node naming stable and SSH access reliable across three Ubuntu Server nodes:
+- `node0` (controller)
+- `node1`, `node2` (compute)
+
+This uses:
+- Persistent hostnames via `hostnamectl`
+- Name resolution via `/etc/hosts` (no DNS required)
+- SSH key-based authentication for passwordless admin access
+
+### ${\color{#f15bb5}\textsf{Prerequisites}}$  
+
+- All three nodes have Ubuntu Server 24.04 LTS installed
+- OpenSSH server is installed and running on all nodes
+- You have a regular user account (not root) on each node
+- Static or reserved DHCP IPs for all nodes (important: IPs must not change)
+
+### ${\color{#f15bb5}\textsf{Step 1: Set a persistent hostname on each node}}$  
+
+Run on each node:
+
+```bash
+# On node0
+sudo hostnamectl set-hostname node0
+
+# On node1
+sudo hostnamectl set-hostname node1
+
+# On node2
+sudo hostnamectl set-hostname node2
+```
+
+Verify:
+
+```bash
+hostnamectl
+# or simply:
+hostname
+```
+
+**Why:** Slurm and cluster tools rely on stable hostnames for identification and communication. A hostname is also used in log files, certificates, and system configuration.
+
+### ${\color{#f15bb5}\textsf{Step 2: Populate /etc/hosts on all nodes}}$  
+
+Edit `/etc/hosts` on **every node**:
+
+```bash
+sudo nano /etc/hosts
+```
+
+Add or modify entries so that all three nodes can resolve each other by name. Replace the IP addresses with your actual node IPs:
+
+```text
+# Cluster nodes
+192.168.1.10  node0
+192.168.1.11  node1
+192.168.1.12  node2
+
+# Standard localhost mappings (should already exist)
+127.0.0.1     localhost
+::1           localhost
+```
+
+**Why:** Without these mappings, when Slurm, PyTorch, or SSH tries to reach a node by hostname (e.g., `node1`), it will fail because there is no DNS server to resolve it. A local `/etc/hosts` file is the simplest way to ensure name resolution works everywhere in the cluster.
+
+**Tip:** Ubuntu Server typically includes a line like `127.0.1.1 <hostname>` at install time. Keep it (or update it to match your node's hostname) for local hostname resolution to work correctly.
+
+
+### ${\color{#f15bb5}\textsf{Test name resolution}}$  
+
+From any node, verify that all nodes can resolve each other:
+
+```bash
+ping -c 1 node0
+ping -c 1 node1
+ping -c 1 node2
+
+# Also test via DNS lookup
+nslookup node0
+nslookup node1
+nslookup node2
+```
+
+All three should respond. If any ping fails or returns "Name or service not known", check:
+- Your `/etc/hosts` entries on that node
+- Spelling of hostnames
+- Network connectivity (can you ping by IP? `ping -c 1 192.168.1.10`)
+
+### ${\color{#f15bb5}\textsf{Step 3: Test SSH connectivity (password-based)}}$  
+
+From `node0`, test that you can SSH to the other nodes:
+
+```bash
+ssh youruser@node1
+# You should be prompted for a password
+# Type the password and press Enter
+# If successful, you will see a shell prompt on node1
+
+exit
+# Return to node0
+
+ssh youruser@node2
+# Same as above
+exit
+```
+
+**Why:** This confirms that SSH daemon is running, network is working, and basic authentication is possible.
+
+**What to check if SSH fails:**
+- Can you ping the node by IP? (`ping 192.168.1.11`)
+- Is SSH daemon running? (On the remote node: `sudo systemctl status ssh`)
+- Are there firewall rules blocking port 22? (Less common on a local network, but possible)
+
+### ${\color{#f15bb5}\textsf{Step 4: Configure SSH key-based authentication}}$  
+
+Key-based authentication is more secure and avoids typing passwords repeatedly during cluster administration.
+
+#### ${\color{#90be6d}\textsf{4a) Generate an SSH key on node0}}$  
+
+On `node0`, generate an Ed25519 key (modern, secure, and compact):
+
+```bash
+ssh-keygen -t ed25519
+```
+
+Press Enter at each prompt to accept defaults (or customize the path/passphrase if needed).
+
+Output will look like:
+
+```
+Generating public/private ed25519 key pair.
+Enter file in which to save the key (/home/youruser/.ssh/id_ed25519): [press Enter]
+Enter passphrase (empty for no passphrase): [press Enter or add a passphrase]
+Enter same passphrase again: [press Enter or repeat passphrase]
+Your public key has been saved in /home/youruser/.ssh/id_ed25519.pub
+Your private key has been saved in /home/youruser/.ssh/id_ed25519
+```
+
+**Passphrase:** You can leave it empty for passwordless SSH (common in automated clusters), or set one for extra security. For a lab cluster, empty is fine.
+
+
+
+#### ${\color{#90be6d}\textsf{4b) Copy the public key to node1 and node2}}$  
+
+Use `ssh-copy-id` to copy your public key to the remote nodes:
+
+```bash
+ssh-copy-id youruser@node1
+# Enter your password when prompted
+# The tool will append your public key to ~/.ssh/authorized_keys on node1
+
+ssh-copy-id youruser@node2
+# Enter your password when prompted
+```
+
+**What `ssh-copy-id` does:**
+1. Reads your local public key (`~/.ssh/id_ed25519.pub`)
+2. Connects to the remote node (uses password auth)
+3. Appends the key to the remote `~/.ssh/authorized_keys` file
+
+#### ${\color{#90be6d}\textsf{4c) Test key-based SSH login}}$  
+
+From `node0`:
+
+```bash
+ssh youruser@node1
+# Should NOT ask for a password
+# If it does, check the error message (usually a key permissions issue)
+
+exit
+
+ssh youruser@node2
+# Should NOT ask for a password
+
+exit
+```
+
+**If it still asks for a password:**
+- Check file permissions: `ls -la ~/.ssh/` (should be `700` on the directory)
+- Check on the remote: `ls -la ~/.ssh/authorized_keys` (should be `600`)
+- Fix with: `chmod 700 ~/.ssh` and `chmod 600 ~/.ssh/authorized_keys` on the remote
+
+### ${\color{#f15bb5}\textsf{Step 5: (Optional but recommended) Disable password authentication in SSH}}$  
+
+Once you confirm key-based login works **from all admin machines**, you can disable password-based SSH login for better security.
+
+#### ${\color{#90be6d}\textsf{5a) Edit SSH daemon config on all nodes}}$   
+
+On **each node**, edit the SSH daemon configuration:
+
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+
+Find the line (it may be commented out):
+
+```text
+#PasswordAuthentication yes
+```
+
+Change it to:
+
+```text
+PasswordAuthentication no
+```
+
+Save the file (Ctrl+X, then Y, then Enter in nano).
+
+#### ${\color{#90be6d}\textsf{5b) Restart SSH daemon}}$  
+
+On each node:
+
+```bash
+sudo systemctl restart ssh
+```
+
+#### ${\color{#90be6d}\textsf{5c) Keep at least one SSH session open}}$ 
+
+**Before restarting SSH, open a second terminal with an active SSH session to one of the nodes.** If you misconfigure SSH, you can still use the open session to fix it.
+
+**After restarting, test that key-based login still works:**
+
+```bash
+ssh youruser@node1
+# Should work without a password
+exit
+```
+
+**If locked out:** Use the open session you left running to revert the change, then investigate.
+
+
+
+### ${\color{#f15bb5}\textsf{Verification checklist}}$ 
+
+Before moving to the next step (NVIDIA drivers + CUDA), verify:
+
+- [ ] Each node has a stable hostname (`hostnamectl`)
+- [ ] Each node can ping every other node by name (`ping node0`, `ping node1`, `ping node2`)
+- [ ] SSH login from node0 to node1 and node2 works without a password
+- [ ] (If you disabled it) Password-based SSH is disabled and key-based works
+
+### ${\color{#f15bb5}\textsf{Summary}}$ 
+
+You now have:
+1. **Stable hostnames** (`node0`, `node1`, `node2`) that persist across reboots
+2. **Local name resolution** via `/etc/hosts` (DNS-independent)
+3. **Passwordless SSH** from node0 to node1 and node2 (key-based authentication)
+
+This is the foundation for Slurm and distributed training: every tool will use hostnames, and cluster scripts can run without interactive prompts.
+
+
  ## ${\color{#fee440}\textsf{References (high-level)}}$ 
 - Slurm Overview (official): https://slurm.schedmd.com/overview.html 
 - Slurm Quick Start (official): https://slurm.schedmd.com/quickstart.html 
@@ -138,6 +392,16 @@ Then log out/reboot and select the Cinnamon session from the login screen. [page
 - Basic server installation (Subiquity / Canonical): https://github.com/canonical/subiquity/blob/main/doc/howto/basic-server-installation.rst [page:5]
 - Install GNOME on Ubuntu 24.04 (example guide): https://greenwebpage.com/community/how-to-install-gnome-desktop-on-ubuntu-24-04/ [page:6]
 - Install Cinnamon on Ubuntu 24.04 (example guide): https://www.tecmint.com/install-cinnamon-desktop-on-ubuntu/ [page:7]
+
+- Setting the Hostname on Ubuntu 24.04: https://linuxconfig.org/setting-the-hostname-on-ubuntu-24-04
+- How to Change Hostname on Ubuntu 22.04: https://linuxize.com/post/how-to-change-hostname-on-ubuntu-22-04/
+
+- How to Change Hostname on Ubuntu 24.04: https://docs.vultr.com/how-to-change-a-hostname-on-ubuntu-24-04
+- Understanding /etc/hosts: https://linuxize.com/post/how-to-change-hostname-on-ubuntu-22-04/
+- SSH Copy ID for Copying SSH Keys to Servers: https://www.ssh.com/academy/ssh/copy-id
+- How to Set Up SSH Keys on Ubuntu 22.04: https://www.digitalocean.com/community/tutorials/how-to-set-up-ssh-keys-on-ubuntu-22-04
+- How to allow or disallow SSH password authentication: https://www.simplified.guide/ssh/disable-password-authentication
+- Disable SSH Password Authentication For Specific User Or Group: https://ostechnix.com/disable-ssh-password-authentication-for-specific-user-or-group/
 
  
 
