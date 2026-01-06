@@ -381,7 +381,65 @@ You now have:
 This is the foundation for Slurm and distributed training: every tool will use hostnames, and cluster scripts can run without interactive prompts.
 
 
- ## ${\color{#fee440}\textsf{References (high-level)}}$ 
+# 1. System update and NVIDIA prerequisites
+sudo apt update && sudo apt upgrade -y
+sudo apt install linux-headers-$(uname -r) build-essential dkms -y
+
+# 2. NVIDIA driver repository and installation
+sudo add-apt-repository ppa:graphics-drivers/ppa -y
+sudo apt update
+sudo apt install nvidia-driver-560 -y
+
+# 3. REBOOT ALL NODES (do this after driver install)
+sudo reboot
+
+nvidia-smi
+
+# 4. CUDA Toolkit 12.6 installation
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+sudo apt install cuda-toolkit-12-6 -y
+
+# 5. MUNGE authentication (Slurm prerequisite)
+sudo apt install munge libmunge-dev -y
+
+# 6. Slurm user and directories
+sudo groupadd -g 1002 slurm
+sudo useradd -u 1002 -g slurm -d /var/lib/slurm -s /bin/bash slurm
+sudo mkdir -p /etc/slurm /var/spool/slurm/d /var/log/slurm
+sudo chown slurm:slurm /var/spool/slurm/d /var/log/slurm
+
+# 7. Install Slurm packages
+sudo apt install slurm-wlm slurm-client -y
+
+# 8. Generate MUNGE authentication key
+sudo /usr/sbin/create-munge-key
+sudo cp /etc/munge/munge.key /root/munge.key
+
+# 9. Create Slurm configuration files
+sudo tee /etc/slurm/slurm.conf > /dev/null << 'EOF'
+ControlMachine=node0
+AuthType=auth/munge
+SlurmctldPort=6817
+SlurmdPort=6818
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SwitchType=switch/none
+MpiDefault=none
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmdPidFile=/var/run/slurmd.pid
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/none
+NodeName=node[0-2] Procs=64 State=UNKNOWN
+PartitionName=main Nodes=node[0-2] Default=YES MaxTime=INFINITE State=UP
+EOF
+
+sudo tee /etc/slurm/gres.conf > /dev/null << 'EOF'
+Name=gpu Type=rtx5090 Count=1 File=/dev/nvidia0
+EOF
+
+ ## ${\color{#fee440}\textsf{References}}$ 
 - Slurm Overview (official): https://slurm.schedmd.com/overview.html 
 - Slurm Quick Start (official): https://slurm.schedmd.com/quickstart.html 
 - PyTorch Multinode Training (official tutorial): https://docs.pytorch.org/tutorials/intermediate/ddp_series_multinode.html  
